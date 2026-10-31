@@ -13,17 +13,45 @@ jobs:
     timeout-minutes: 330
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        id: checkout
         with:
           persist-credentials: false
+      - name: Initialize private report
+        id: init
+        env:
+          PRIVATE_STATE_REPO: ${{ secrets.PRIVATE_STATE_REPO }}
+          PRIVATE_STATE_TOKEN: ${{ secrets.PRIVATE_STATE_TOKEN }}
+        run: python3 diagnostics.py start
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        id: python
         with:
           python-version: '3.11'
       - name: Offline checks
-        run: python -m unittest discover -s tests > /dev/null 2>&1
+        id: checks
+        env:
+          PRIVATE_STATE_REPO: ${{ secrets.PRIVATE_STATE_REPO }}
+          PRIVATE_STATE_TOKEN: ${{ secrets.PRIVATE_STATE_TOKEN }}
+        run: |
+          python3 diagnostics.py stage offline_checks
+          python -m unittest discover -s tests > /dev/null 2>&1
+      - name: Record preparation
+        id: node_marker
+        env:
+          PRIVATE_STATE_REPO: ${{ secrets.PRIVATE_STATE_REPO }}
+          PRIVATE_STATE_TOKEN: ${{ secrets.PRIVATE_STATE_TOKEN }}
+        run: python3 diagnostics.py stage setup_node
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        id: node
         with:
           node-version: '22'
+      - name: Record preparation
+        id: deps_marker
+        env:
+          PRIVATE_STATE_REPO: ${{ secrets.PRIVATE_STATE_REPO }}
+          PRIVATE_STATE_TOKEN: ${{ secrets.PRIVATE_STATE_TOKEN }}
+        run: python3 diagnostics.py stage dependencies
       - name: Prepare
+        id: deps
         shell: bash
         run: |
           set -euo pipefail
@@ -31,6 +59,7 @@ jobs:
           sudo apt-get install -y ffmpeg > /dev/null 2>&1
           python -m pip install --no-cache-dir -r requirements.txt > /dev/null 2>&1
       - name: Process
+        id: process
         env:
           PRIVATE_STATE_REPO: ${{ secrets.PRIVATE_STATE_REPO }}
           PRIVATE_STATE_TOKEN: ${{ secrets.PRIVATE_STATE_TOKEN }}
@@ -43,4 +72,11 @@ jobs:
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-flash-latest' }}
           GROQ_MODEL: ${{ vars.GROQ_MODEL || 'openai/gpt-oss-20b' }}
           MADE_FOR_KIDS: ${{ vars.QUEUE_MADE_FOR_KIDS || 'false' }}
-        run: python quiet.py
+        run: python diagnostics.py run
+      - name: Finalize private report
+        if: always() && steps.checkout.outcome == 'success'
+        env:
+          PRIVATE_STATE_REPO: ${{ secrets.PRIVATE_STATE_REPO }}
+          PRIVATE_STATE_TOKEN: ${{ secrets.PRIVATE_STATE_TOKEN }}
+          WORKFLOW_STEPS: ${{ toJSON(steps) }}
+        run: python3 diagnostics.py finish
