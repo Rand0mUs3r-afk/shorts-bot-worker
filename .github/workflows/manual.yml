@@ -1,6 +1,13 @@
 name: Private processing
 on:
   workflow_dispatch:
+    inputs:
+      max_shorts:
+        description: Maximum Shorts per NEW source (5 preferred; 10 maximum)
+        required: true
+        type: choice
+        options: ['5', '10']
+        default: '5'
 permissions:
   contents: read
 concurrency:
@@ -63,6 +70,7 @@ jobs:
         env:
           PRIVATE_STATE_REPO: ${{ secrets.PRIVATE_STATE_REPO }}
           PRIVATE_STATE_TOKEN: ${{ secrets.PRIVATE_STATE_TOKEN }}
+          MAX_SHORTS_PER_VIDEO: ${{ inputs.max_shorts || '5' }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
@@ -72,7 +80,7 @@ jobs:
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-flash-latest' }}
           GROQ_MODEL: ${{ vars.GROQ_MODEL || 'openai/gpt-oss-20b' }}
           MADE_FOR_KIDS: ${{ vars.QUEUE_MADE_FOR_KIDS || 'false' }}
-        run: python generation.py
+        run: python quality.py
       - name: Finalize private report
         if: always() && steps.checkout.outcome == 'success'
         env:
