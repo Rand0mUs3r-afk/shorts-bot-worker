@@ -22,7 +22,8 @@ CATEGORIES = {'ledger_invalid', 'upload_uncertain', 'queue_invalid', 'state_conf
               'legacy_plan_requires_review', 'cached_plan_invalid', 'media_invalid', 'render_invalid',
               'source_incomplete', 'credentials_missing', 'channel_ambiguous', 'channel_mismatch',
               'source_not_owned', 'ai_configuration', 'ai_failed', 'private_reporting_configuration',
-              'private_repository_required', 'run_identity', 'invalid_existing_report', 'report_limit'}
+              'private_repository_required', 'run_identity', 'invalid_existing_report', 'report_limit',
+              'source_too_short', 'video_stream_missing', 'no_clips_generated'}
 STEP_NAMES = {'checkout', 'init', 'python', 'checks', 'node_marker', 'node', 'deps_marker', 'deps', 'process'}
 
 
@@ -71,6 +72,25 @@ def safe_error(exc):
         if accepted:
             result['reasons'] = accepted
     return result
+
+
+def batch_status(doc):
+    results = doc.get('source_results', {})
+    completed = sum(row.get('status') == 'complete' for row in results.values())
+    failed = sum(row.get('status') == 'failed' for row in results.values())
+    return ('partial_success' if completed else 'failed') if failed else 'success'
+
+
+def recoverable_source_error(exc, stage, state, module):
+    if stage not in {'download', 'transcription', 'highlights', 'render'}:
+        return False
+    if any(row.get('status') == 'uploading' for row in state.get('uploads', {}).values()):
+        return False
+    if isinstance(exc, MediaError):
+        return exc.category != 'disk_full'
+    failure = getattr(module, 'Failure', ())
+    return isinstance(exc, failure) and str(exc) in {
+        'source_too_short', 'video_stream_missing', 'no_clips_generated', 'plan_invalid', 'render_invalid'}
 
 
 class Reporter:
@@ -140,9 +160,26 @@ class Reporter:
         self.doc.update(status='failed', error=safe_error(exc))
         self.write()
 
+    def source_result(self, source, status, stage, exc=None):
+        if not re.fullmatch(r'[A-Za-z0-9_-]{11}', source) or status not in {'complete', 'failed'} or stage not in STAGES:
+            raise DiagnosticError('invalid_source_result')
+        self.close_event('completed' if status == 'complete' else 'failed')
+        result = {'status': status, 'stage': stage, 'time': now()}
+        if exc is not None:
+            result['error'] = safe_error(exc)
+        self.doc.setdefault('source_results', {})[source] = result
+        self.write()
+
     def success(self):
         self.close_event('completed')
-        self.doc.update(status='success', stage='complete')
+        status = batch_status(self.doc)
+        results = self.doc.get('source_results', {})
+        summary = self.doc.setdefault('summary', {})
+        summary.update(sources_completed=sum(row['status'] == 'complete' for row in results.values()),
+                       sources_failed=sum(row['status'] == 'failed' for row in results.values()))
+        if results:
+            summary['outcome'] = status
+        self.doc.update(status=status, stage='complete')
         self.write()
 
     def finish_workflow(self, steps):
@@ -186,23 +223,42 @@ def run_worker(report, module=None):
     if module is None:
         import worker as module
     original_setattr, original_process, original_plan, original_command = module.Store.__setattr__, module.process, module.plan, module.command
+    original_status = getattr(module.Store, 'status', None)
     def tracked_setattr(store, name, value):
         old = store.__dict__.get('stage')
         original_setattr(store, name, value)
         if name == 'stage' and store.__dict__.get('verified') and not (value == 'highlights' and old == 'transcription'):
             report.stage(value)
-    def tracked_process(source, *args, **kwargs):
+    def tracked_process(source, yt, client, models, state, store, work):
         if not re.fullmatch(r'[A-Za-z0-9_-]{11}', source):
             raise DiagnosticError('invalid_source')
         report.doc['source'] = source
-        result = original_process(source, *args, **kwargs)
+        try:
+            result = original_process(source, yt, client, models, state, store, work)
+            if state['sources'].get(source) != 'complete':
+                raise DiagnosticError('source_not_completed')
+            report.source_result(source, 'complete', store.stage)
+        except Exception as exc:
+            if not recoverable_source_error(exc, store.stage, state, module):
+                raise
+            stats = report.doc.get('source_stats', {}).get(source)
+            if stats is not None:
+                stats.update(outcome='failed', error=safe_error(exc))
+            report.source_result(source, 'failed', store.stage, exc)
+            result = None
         report.doc.pop('source', None)
         return result
+    def tracked_status(store, code):
+        if code == 'success':
+            code = batch_status(report.doc)
+        return original_status(store, code)
     def tracked_plan(*args, **kwargs):
         report.stage('highlights')
         return original_plan(*args, **kwargs)
     try:
         module.Store.__setattr__ = tracked_setattr
+        if original_status is not None:
+            module.Store.status = tracked_status
         module.process, module.plan, module.command = tracked_process, tracked_plan, media_command
         report.stage('state_preflight')
         module.main()
@@ -215,6 +271,8 @@ def run_worker(report, module=None):
         raise
     finally:
         module.Store.__setattr__ = original_setattr
+        if original_status is not None:
+            module.Store.status = original_status
         module.process, module.plan, module.command = original_process, original_plan, original_command
 
 
@@ -241,7 +299,7 @@ def cli(args):
                 report.finish_workflow(json.loads(os.getenv('WORKFLOW_STEPS', '{}')))
             else:
                 raise DiagnosticError('invalid_command')
-            success = args != ['finish'] or report.doc.get('status') == 'success'
+            success = args[0] in ('start', 'stage') or report.doc.get('status') in ('success', 'partial_success')
     except BaseException:
         pass
     finally:
