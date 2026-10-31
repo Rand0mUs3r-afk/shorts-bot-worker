@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+.env.*
+output/
+*.mp4
+*.webm
+*cookies*
+*token*.json
+shorts_uploads.json
+youtube_queue.txt
+worker_status.json

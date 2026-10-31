@@ -1,0 +1,7 @@
+yt-dlp[default]
+faster-whisper
+google-genai
+google-api-python-client
+google-auth
+requests
+httpx
