@@ -72,7 +72,7 @@ jobs:
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-flash-latest' }}
           GROQ_MODEL: ${{ vars.GROQ_MODEL || 'openai/gpt-oss-20b' }}
           MADE_FOR_KIDS: ${{ vars.QUEUE_MADE_FOR_KIDS || 'false' }}
-        run: python diagnostics.py run
+        run: python generation.py
       - name: Finalize private report
         if: always() && steps.checkout.outcome == 'success'
         env:
