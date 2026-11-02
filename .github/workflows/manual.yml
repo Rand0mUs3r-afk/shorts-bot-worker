@@ -3,10 +3,10 @@ on:
   workflow_dispatch:
     inputs:
       max_shorts:
-        description: Maximum Shorts per NEW source (5 preferred; 10 maximum)
+        description: Maximum Shorts per NEW source (5 default; up to 30)
         required: true
         type: choice
-        options: ['5', '10']
+        options: ['5', '10', '15', '20', '25', '30']
         default: '5'
 permissions:
   contents: read
