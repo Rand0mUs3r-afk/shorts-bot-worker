@@ -334,11 +334,8 @@ def main():
         channel = channels[0]['id']
         if (state.get('channel_id') and state['channel_id'] != channel) or (state['uploads'] and not state.get('channel_id')):
             raise Failure('channel_mismatch')
-        store.stage = 'ownership'
-        rows = yt.videos().list(part='snippet', id=','.join(sources)).execute().get('items', [])
-        owned = {row['id'] for row in rows if row['snippet']['channelId'] == channel}
-        if any(source not in owned for source in sources):
-            raise Failure('source_not_owned')
+        # Sources may belong to any channel; download access is checked per source.
+        # Keep the authenticated destination channel bound to this upload ledger.
         state['channel_id'] = channel
         store.save(state)
         with tempfile.TemporaryDirectory(prefix='shorts-', dir=os.getenv('RUNNER_TEMP')) as temporary:
