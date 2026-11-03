@@ -12,7 +12,7 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 STAGES = {'setup_python', 'offline_checks', 'setup_node', 'dependencies', 'state_preflight',
           'legacy_cutover', 'ledger_read', 'credentials', 'ownership', 'download', 'ai_preflight',
-          'transcription', 'highlights', 'render', 'upload_reservation', 'upload',
+          'transcription', 'highlights', 'render', 'metadata', 'upload_reservation', 'upload',
           'upload_checkpoint', 'source_checkpoint', 'complete', 'processing'}
 REASONS = {'quotaExceeded', 'dailyLimitExceeded', 'uploadLimitExceeded', 'insufficientPermissions',
            'accessNotConfigured', 'serviceDisabled', 'youtubeSignupRequired', 'forbidden',
@@ -23,7 +23,7 @@ CATEGORIES = {'ledger_invalid', 'upload_uncertain', 'queue_invalid', 'state_conf
               'source_incomplete', 'credentials_missing', 'channel_ambiguous', 'channel_mismatch',
               'source_not_owned', 'ai_configuration', 'ai_failed', 'private_reporting_configuration',
               'private_repository_required', 'run_identity', 'invalid_existing_report', 'report_limit',
-              'source_too_short', 'video_stream_missing', 'no_clips_generated'}
+              'source_too_short', 'video_stream_missing', 'no_clips_generated', 'metadata_unavailable'}
 STEP_NAMES = {'checkout', 'init', 'python', 'checks', 'node_marker', 'node', 'deps_marker', 'deps', 'process'}
 
 
@@ -82,7 +82,7 @@ def batch_status(doc):
 
 
 def recoverable_source_error(exc, stage, state, module):
-    if stage not in {'download', 'transcription', 'highlights', 'render'}:
+    if stage not in {'download', 'transcription', 'highlights', 'render', 'metadata'}:
         return False
     if any(row.get('status') == 'uploading' for row in state.get('uploads', {}).values()):
         return False
@@ -90,7 +90,7 @@ def recoverable_source_error(exc, stage, state, module):
         return exc.category != 'disk_full'
     failure = getattr(module, 'Failure', ())
     return isinstance(exc, failure) and str(exc) in {
-        'source_too_short', 'video_stream_missing', 'no_clips_generated', 'plan_invalid', 'render_invalid'}
+        'source_too_short', 'video_stream_missing', 'no_clips_generated', 'plan_invalid', 'render_invalid', 'metadata_unavailable'}
 
 
 class Reporter:
