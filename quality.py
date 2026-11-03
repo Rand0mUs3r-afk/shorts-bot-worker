@@ -8,6 +8,7 @@ import sys
 G = None
 BASE_BUILD = None
 BASE_PROCESS = None
+METADATA_CONTEXT = None
 
 
 def clip_limit():
@@ -121,9 +122,22 @@ def render_clip(media, target, moment):
     actual = G.W.duration(target)
     if not 14.9 <= actual <= 180.1 or abs(actual - expected) > 1:
         raise G.W.Failure('render_invalid')
+    if METADATA_CONTEXT is not None:
+        from clip_metadata import enrich
+        enrich(moment, target, METADATA_CONTEXT)
 
 
 def process(source, yt, client, models, state, store, work):
+    global METADATA_CONTEXT
+    previous_context = METADATA_CONTEXT
+    original_transcribe = getattr(G, 'transcribe', None)
+    METADATA_CONTEXT = {'generation': G, 'source': source, 'state': state, 'store': store, 'segments': []}
+    def capture_transcript(*args, **kwargs):
+        rows = original_transcribe(*args, **kwargs)
+        METADATA_CONTEXT['segments'] = rows
+        return rows
+    if original_transcribe is not None:
+        G.transcribe = capture_transcript
     original_command = G.W.command
     def command(args):
         args = list(args)
@@ -138,6 +152,9 @@ def process(source, yt, client, models, state, store, work):
         return BASE_PROCESS(source, yt, client, models, state, store, work)
     finally:
         G.W.command = original_command
+        if original_transcribe is not None:
+            G.transcribe = original_transcribe
+        METADATA_CONTEXT = previous_context
 
 
 def activate():
@@ -150,6 +167,8 @@ def activate():
     G.activate()
     G.BASE_PLAN = select_plan
     G.W.saved_plan = saved_plan
+    from clip_metadata import private_body
+    G.W.private_body = private_body
 
 
 if __name__ == '__main__':

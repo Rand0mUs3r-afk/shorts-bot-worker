@@ -1,0 +1,9 @@
+# Story-only publishing metadata
+
+New uploads use catchy, clip-specific titles and concise descriptions about the action/dialogue. The active upload body contains ONLY the validated title and description plus private visibility and the configured made-for-kids flag. It adds no Bot reference, source URL, AI-production wording, numbered sample title, hashtag, credit or promotional filler. This does not change on-screen subtitles.
+
+Metadata is prepared after rendering, BEFORE creating an upload reservation. With GEMINI_API_KEY configured, up to three reduced-resolution JPEG snapshots from the rendered clip are sent to Gemini together with available clip speech/context. These extra per-clip requests use provider quota and share these images with that provider. No image artifacts or raw logs are published. Groq can rewrite metadata from available transcript text without images. Otherwise an existing descriptive title/reason can be retained only if it passes the new checks. Images alone cannot establish every event, so prompts prohibit invented outcomes and names; review output for accuracy.
+
+If a sampled clip has no usable grounding/provider result, it is left pending rather than uploaded with Sample 01 or fabricated metadata. Other selected sources can continue under the existing recoverable-error handling. No new secrets are required, but frame-grounded titles need the existing Gemini key. Provider outages or quota limits may prevent new metadata generation.
+
+Validated metadata is saved in the PRIVATE source plan and reused on retry. Clip timestamps and upload identities are not changed. Existing uploaded videos are not edited or duplicated; completed sources remain skipped. This commit does not run processing, modify YouTube posts, or change visibility/queue/secrets. Start a new manual run on main after approval.
