@@ -1,4 +1,6 @@
 """Clip-grounded publishing text with private diagnostics and dialogue fallback."""
+import base64
+import time
 import json
 import os
 import re
@@ -95,22 +97,26 @@ def gemini(prompt, images):
     from google import genai
     from google.genai import types
     if _GEMINI is None:
-        _GEMINI = genai.Client(api_key=os.environ['GEMINI_API_KEY'], http_options={'timeout': 60000})
+        _GEMINI = genai.Client(api_key=os.environ['GEMINI_API_KEY'], http_options={'timeout': 30000, 'retry_options': {'attempts': 1}})
     parts = [prompt] + [types.Part.from_bytes(data=data, mime_type='image/jpeg') for data in images]
     response = _GEMINI.models.generate_content(model=os.getenv('GEMINI_MODEL') or 'gemini-flash-latest',
         contents=parts, config={'response_mime_type': 'application/json'})
     return decode(response.text)
 
 
-def groq(prompt):
+def groq(prompt, images=()):
     import httpx
-    model = os.getenv('GROQ_MODEL') or 'openai/gpt-oss-20b'
-    payload = {'model': model, 'messages': [{'role': 'user', 'content': prompt}], 'max_completion_tokens': 4096}
+    model = (os.getenv('GROQ_VISION_MODEL') or 'qwen/qwen3.8-27b') if images else (os.getenv('GROQ_MODEL') or 'openai/gpt-oss-20b')
+    content = ([{'type': 'text', 'text': prompt}] + [{'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + base64.b64encode(data).decode()}} for data in images[:3]]) if images else prompt
+    payload = {'model': model, 'messages': [{'role': 'user', 'content': content}], 'max_completion_tokens': 4096}
+    if images:
+        payload['response_format'] = {'type': 'json_object'}
+        payload['reasoning_effort'] = 'none'
     if model in {'openai/gpt-oss-20b', 'openai/gpt-oss-120b'}:
         payload['reasoning_effort'] = 'low'
     response = httpx.post('https://api.groq.com/openai/v1/chat/completions',
         headers={'Authorization': 'Bearer ' + os.environ['GROQ_API_KEY']}, json=payload,
-        timeout=60, follow_redirects=False)
+        timeout=30, follow_redirects=False)
     response.raise_for_status()
     choice = response.json()['choices'][0]
     if choice.get('finish_reason') != 'stop':
@@ -136,23 +142,61 @@ def dialogue_metadata(speech):
     return max(candidates, key=lambda item: item[0])[1]
 
 
+def transient(exc):
+    code = getattr(exc, 'code', None) or getattr(getattr(exc, 'response', None), 'status_code', None)
+    if code is not None:
+        return str(code) in {'408', '429', '500', '502', '503', '504'}
+    return (isinstance(exc, (TimeoutError, ConnectionError, json.JSONDecodeError))
+            or type(exc).__name__ in {'TimeoutException', 'ConnectTimeout', 'ReadTimeout', 'WriteTimeout', 'PoolTimeout', 'ConnectError', 'ReadError', 'WriteError', 'RemoteProtocolError'}
+            or isinstance(exc, ValueError) and str(exc) in {'metadata_invalid', 'metadata_incomplete'})
+
+
+def retry_delay(exc):
+    value = getattr(getattr(exc, 'response', None), 'headers', {}).get('retry-after', '')
+    try:
+        from email.utils import parsedate_to_datetime
+        from datetime import datetime, timezone
+        return max(0, float(value)) if str(value).replace('.', '', 1).isdigit() else max(0, (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 def choose_metadata(moment, speech, images, row=None):
-    if os.getenv('GEMINI_API_KEY') and (images or speech.strip()):
-        try:
-            selected = gemini(prompt_for(moment, speech, bool(images)), images)
-            if row is not None:
-                row['metadata_method'] = 'gemini'
-            return selected
-        except Exception as exc:
-            note(row, 'gemini', exc)
-    if os.getenv('GROQ_API_KEY') and speech.strip():
-        try:
-            selected = groq(prompt_for(moment, speech, False))
-            if row is not None:
-                row['metadata_method'] = 'groq'
-            return selected
-        except Exception as exc:
-            note(row, 'groq', exc)
+    row = {} if row is None else row
+    row.pop('metadata_method', None)
+    row['metadata_attempts'] = []
+    active = {name for name in ('gemini', 'groq') if os.getenv(name.upper() + '_API_KEY') and (images or speech.strip())}
+    for name in ('gemini', 'groq'):
+        if name not in active:
+            row['metadata_attempts'].append({'provider': name, 'status': 'skipped', 'reason': 'missing_key_or_evidence'})
+    prompt = prompt_for(moment, speech, bool(images))
+    deadline, wait_until = time.monotonic() + 240, 0
+    for cycle in range(1, 4):
+        for name, function in (('gemini', gemini), ('groq', groq)):
+            if name not in active or deadline - time.monotonic() < 30:
+                continue
+            attempt = {'provider': name, 'round': cycle}
+            row['metadata_attempts'].append(attempt)
+            try:
+                selected = validate(function(prompt, images) if images or name == 'gemini' else function(prompt))
+            except Exception as exc:
+                note(row, name, exc)
+                attempt.update(row['metadata_failures'][-1])
+                attempt.update(status='failed', retryable=transient(exc))
+                if not attempt['retryable']:
+                    active.discard(name)
+                else:
+                    wait_until = max(wait_until, time.monotonic() + retry_delay(exc))
+            else:
+                attempt['status'] = 'completed'
+                row['metadata_method'] = name
+                return selected
+        if not active or cycle == 3:
+            break
+        delay = max(5 * 2 ** (cycle - 1), wait_until - time.monotonic())
+        if time.monotonic() + delay + 30 > deadline:
+            break
+        time.sleep(delay)
     try:
         selected = dialogue_metadata(speech)
         if row is not None:
@@ -188,7 +232,9 @@ def speech_for_clip(moment, target, context, row):
 def enrich(moment, target, context):
     generation, source, state, store = (context[name] for name in ('generation', 'source', 'state', 'store'))
     row = generation.stats(source)
-    row.update(metadata_stage='extract_context', metadata_status='running')
+    row.pop('metadata_method', None)
+    row.update(metadata_stage='extract_context', metadata_status='running', metadata_failures=[], metadata_attempts=[])
+    store.stage = 'metadata'
     key = generation.W.key_for(source, moment)
     saved = state['sources'].get(source)
     if not isinstance(saved, dict) or not isinstance(saved.get('moments'), list):
@@ -202,14 +248,14 @@ def enrich(moment, target, context):
         row['metadata_method'] = 'cached'
     else:
         speech = speech_for_clip(moment, target, context, row)
-        images = frames(target, moment['end_time'] - moment['start_time']) if os.getenv('GEMINI_API_KEY') else []
+        images = frames(target, moment['end_time'] - moment['start_time']) if (os.getenv('GEMINI_API_KEY') or os.getenv('GROQ_API_KEY')) else []
         row.update(metadata_frame_count=len(images), metadata_stage='describe_clip')
         try:
             selected = choose_metadata(moment, speech, images, row)
         except Exception as exc:
             note(row, 'final_validation', exc)
             row.update(metadata_stage='describe_clip', metadata_status='unavailable')
-            raise generation.W.Failure('plan_invalid') from None
+            raise generation.W.Failure('metadata_unavailable') from None
         cache[key] = {'version': 1, **selected}
     moment.update(title=selected['title'], reason=selected['description'])
     for planned in saved['moments']:
