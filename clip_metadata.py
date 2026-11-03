@@ -152,7 +152,8 @@ def transient(exc):
 
 
 def retry_delay(exc):
-    value = getattr(getattr(exc, 'response', None), 'headers', {}).get('retry-after', '')
+    headers = getattr(getattr(exc, 'response', None), 'headers', None) or {}
+    value = headers.get('retry-after', '')
     try:
         from email.utils import parsedate_to_datetime
         from datetime import datetime, timezone
@@ -170,33 +171,41 @@ def choose_metadata(moment, speech, images, row=None):
         if name not in active:
             row['metadata_attempts'].append({'provider': name, 'status': 'skipped', 'reason': 'missing_key_or_evidence'})
     prompt = prompt_for(moment, speech, bool(images))
-    deadline, wait_until = time.monotonic() + 240, 0
-    for cycle in range(1, 4):
-        for name, function in (('gemini', gemini), ('groq', groq)):
-            if name not in active or deadline - time.monotonic() < 30:
-                continue
-            attempt = {'provider': name, 'round': cycle}
-            row['metadata_attempts'].append(attempt)
-            try:
-                selected = validate(function(prompt, images) if images or name == 'gemini' else function(prompt))
-            except Exception as exc:
-                note(row, name, exc)
-                attempt.update(row['metadata_failures'][-1])
-                attempt.update(status='failed', retryable=transient(exc))
-                if not attempt['retryable']:
-                    active.discard(name)
-                else:
-                    wait_until = max(wait_until, time.monotonic() + retry_delay(exc))
-            else:
-                attempt['status'] = 'completed'
-                row['metadata_method'] = name
-                return selected
-        if not active or cycle == 3:
+    # Scheduling budget, not cancellation of an in-flight HTTP request.
+    deadline = time.monotonic() + 240
+    ready_at = {name: 0 for name in active}
+    counts = {name: 0 for name in active}
+    functions = {'gemini': gemini, 'groq': groq}
+    while True:
+        candidates = [name for name in ('gemini', 'groq') if name in active and counts[name] < 3]
+        if not candidates:
             break
-        delay = max(5 * 2 ** (cycle - 1), wait_until - time.monotonic())
+        name = min(candidates, key=lambda provider: ready_at[provider])
+        delay = max(0, ready_at[name] - time.monotonic())
         if time.monotonic() + delay + 30 > deadline:
             break
-        time.sleep(delay)
+        if delay:
+            time.sleep(delay)
+        if deadline - time.monotonic() < 30:
+            break
+        counts[name] += 1
+        attempt = {'provider': name, 'round': counts[name]}
+        row['metadata_attempts'].append(attempt)
+        function = functions[name]
+        try:
+            selected = validate(function(prompt, images) if images or name == 'gemini' else function(prompt))
+        except Exception as exc:
+            note(row, name, exc)
+            attempt.update(row['metadata_failures'][-1])
+            attempt.update(status='failed', retryable=transient(exc))
+            if not attempt['retryable']:
+                active.discard(name)
+            else:
+                ready_at[name] = time.monotonic() + max(5 * 2 ** (counts[name] - 1), retry_delay(exc))
+        else:
+            attempt['status'] = 'completed'
+            row['metadata_method'] = name
+            return selected
     try:
         selected = dialogue_metadata(speech)
         if row is not None:
