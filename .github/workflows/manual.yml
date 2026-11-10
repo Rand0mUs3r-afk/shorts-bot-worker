@@ -80,7 +80,7 @@ jobs:
           GROQ_MODEL: ${{ vars.GROQ_MODEL || 'openai/gpt-oss-20b' }}
           GROQ_VISION_MODEL: ${{ vars.GROQ_VISION_MODEL || 'qwen/qwen3.8-27b' }}
           MADE_FOR_KIDS: ${{ vars.QUEUE_MADE_FOR_KIDS || 'false' }}
-        run: python quality.py
+        run: python download_diagnostics.py
       - name: Finalize private report
         if: always() && steps.checkout.outcome == 'success'
         env:
